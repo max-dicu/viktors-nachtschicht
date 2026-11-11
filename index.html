@@ -864,7 +864,8 @@ function drawDoor(side, t){
     for (let i = 1; i < 6; i++){ const y = lerp(bot - (bot - top) * 0.18, bot, i / 6); c.beginPath(); c.moveTo(0, y); c.lineTo(W, y); c.stroke(); }
     const v = G.vik.find(x => x.pos === side);
     if (v){
-      c.fillStyle = 'rgba(0,0,0,0.45)'; c.beginPath(); c.ellipse(cx, bot - 2, (q[1][0] - q[0][0]) * 0.5, (bot - top) * 0.02, 0, 0, Math.PI * 2); c.fill();
+      // right door is mirrored, so its width comes out negative: use the absolute value
+      c.fillStyle = 'rgba(0,0,0,0.45)'; c.beginPath(); c.ellipse(cx, bot - 2, Math.abs(q[1][0] - q[0][0]) * 0.5, (bot - top) * 0.02, 0, 0, Math.PI * 2); c.fill();
       figure(v.id, cx, bot - (bot - top) * 0.02, (bot - top) * (v.id === 'daniel' ? 0.97 : 1.03), {t, phase:v.ph, tilt:side === 'L' ? 0.28 : -0.28, eyes:1});
     }
     const vg = c.createRadialGradient(cx, top + (bot - top) * 0.4, 0, cx, top + (bot - top) * 0.4, (bot - top) * 0.7);
@@ -887,7 +888,7 @@ function drawDoor(side, t){
     c.strokeStyle = 'rgba(255,255,255,0.08)'; c.lineWidth = 1;
     for (let i = 1; i < 16; i++){ const f = i / 16 * a; c.beginPath(); c.moveTo(p0[0], lerp(q[0][1], q[3][1], f) + 2); c.lineTo(p1[0], lerp(q[1][1], q[2][1], f) + 2); c.stroke(); }
     for (let k = 0; k < 8; k++){ const sx = lerp(p0[0], p1[0], (k + 0.5) / 8); c.fillStyle = k % 2 ? '#141414' : '#b8902c'; poly([[sx - (p1[0] - p0[0]) / 16, lerp(p3[1], p2[1], (k + 0.5) / 8) - 10], [sx + (p1[0] - p0[0]) / 16, lerp(p3[1], p2[1], (k + 0.5) / 8) - 10], [sx + (p1[0] - p0[0]) / 16, lerp(p3[1], p2[1], (k + 0.5) / 8) - 2], [sx - (p1[0] - p0[0]) / 16, lerp(p3[1], p2[1], (k + 0.5) / 8) - 2]]); c.fill(); }
-    blot((p0[0] + p1[0]) / 2, lerp(top, bot, 0.6), (p1[0] - p0[0]) * 0.4, 0.3, '60,30,10');
+    blot((p0[0] + p1[0]) / 2, lerp(top, bot, 0.6), Math.abs(p1[0] - p0[0]) * 0.4, 0.3, '60,30,10');
   }
   c.restore();
 }
@@ -1259,9 +1260,16 @@ function render(){
 }
 function frame(now){
   const dt = Math.min(0.1, (now - last) / 1000); last = now; T += dt;
-  if (mode === 'game' && G) update(dt);
-  render();
+  // keep the loop alive even if one frame fails, so the game never freezes
   requestAnimationFrame(frame);
+  try {
+    if (mode === 'game' && G) update(dt);
+    render();
+  } catch (e) {
+    console.error(e);
+    if (c.reset) c.reset(); // drops a clip left over from the failed frame
+    c.setTransform(DPR, 0, 0, DPR, 0, 0); c.globalAlpha = 1; c.globalCompositeOperation = 'source-over';
+  }
 }
 showMenu();
 requestAnimationFrame(frame);
