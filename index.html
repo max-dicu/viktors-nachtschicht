@@ -440,7 +440,8 @@ function newGame(n){
   };
 }
 const aiOf = i => { const b = AIS[G.night][i]; return b <= 0 ? 0 : b + (G.hour >= 2) + (G.hour >= 3) + (G.hour >= 4); };
-const viewing = room => G.cam && G.camView === room;
+const viewing = room => (G.cam && G.camView === room) || !!(window.MPV && window.MPV(room));
+const anyCam = () => G.cam || !!(window.MPC && window.MPC());
 const canAct = () => mode === 'game' && G && !G.out && !G.inside && !G.scare && !G.won && !G.cam;
 
 /* ---------- logic ---------- */
@@ -492,7 +493,7 @@ function langeUpdate(dt){
     }
   }
 }
-function usage(){ return 1 + (G.doorL ? 1 : 0) + (G.doorR ? 1 : 0) + ((G.lightL || G.lightR) ? 1 : 0) + (G.cam ? 1 : 0); }
+function usage(){ return 1 + (G.doorL ? 1 : 0) + (G.doorR ? 1 : 0) + ((G.lightL || G.lightR) ? 1 : 0) + (anyCam() ? 1 : 0); }
 function powerOut(){
   G.out = true; G.doorL = G.doorR = G.lightL = G.lightR = false;
   if (G.cam) setCam(false, true);
@@ -506,6 +507,7 @@ function outUpdate(dt){
   else scare('out');
 }
 function update(dt){
+  if (window.MPclientUpdate && MPclientUpdate(dt)) return;
   if (G.scare){ G.scare.t += dt; if (G.scare.t > 1.5 && !G.scare.done){ G.scare.done = true; showDeath(G.scare.why); } return; }
   if (G.won) return;
   G.t += dt;
@@ -524,7 +526,7 @@ function update(dt){
     }
   } else outUpdate(dt);
   if (G.inside && !G.scare){
-    if (G.cam){ G.insideCam += dt; if (G.insideCam > 9) setCam(false, true); }
+    if (anyCam()){ G.insideCam += dt; if (G.insideCam > 9){ setCam(false, true); if (window.MPforceCamDown) MPforceCamDown(); } }
     else { G.insideT -= dt; if (G.insideT <= 0) scare(G.inside.id); }
   }
   if (viewing('5') && G.vik.some(v => v.pos === '5')){ G.clang -= dt; if (G.clang <= 0){ G.clang = 0.6 + rnd() * 1.4; S.clang(); } }
@@ -582,12 +584,14 @@ function deny(btn){ S.deny(); if (btn){ btn.classList.remove('deny'); void btn.o
 function toggleDoor(side){
   const b = $(side === 'L' ? 'bDoorL' : 'bDoorR');
   if (!canAct()) return deny(b);
+  if (window.MPact && MPact('door', side)) return;
   if (side === 'L') G.doorL = !G.doorL; else G.doorR = !G.doorR;
   S.door(); syncHUD(true);
 }
 function toggleLight(side){
   const b = $(side === 'L' ? 'bLightL' : 'bLightR');
   if (!canAct()) return deny(b);
+  if (window.MPact && MPact('light', side)) return;
   if (side === 'L'){ G.lightL = !G.lightL; G.lightR = false; } else { G.lightR = !G.lightR; G.lightL = false; }
   const on = side === 'L' ? G.lightL : G.lightR;
   const v = G.vik.find(x => x.pos === side);
@@ -603,10 +607,12 @@ function setCam(on, silent){
   if (!silent) S.cam();
   $('map').hidden = !on;
   syncHUD(true);
+  if (window.MPcam) MPcam();
 }
 function pickCam(id){
   if (!G || !G.cam) return;
   G.camView = id; G.staticT = Math.max(G.staticT, 0.25); S.blip(); syncMap();
+  if (window.MPcam) MPcam();
 }
 
 let hudKey = '';
@@ -661,6 +667,7 @@ function showMenu(){
   bc.hidden = s <= 1; bc.textContent = `Weiter: Nacht ${s}`;
 }
 function startNight(n){
+  if (window.MPstart && MPstart(n)) return;
   audioInit();
   mode = 'game'; G = newGame(n); hudKey = '';
   $('menu').hidden = true; $('note').hidden = true; $('result').hidden = true; $('hud').hidden = false; $('map').hidden = true;
@@ -1271,9 +1278,164 @@ function frame(now){
     c.setTransform(DPR, 0, 0, DPR, 0, 0); c.globalAlpha = 1; c.globalCompositeOperation = 'source-over';
   }
 }
+/* ---------- Mehrspieler (Koop, bis 4 Wächter) ----------
+   Ein Spieler ist Host und rechnet die Nacht (Viktors, Strom, Türen). Alle teilen sich Büro, Strom, Türen und Licht.
+   Jeder hat seine eigene Kamera. Übertragung über einen öffentlichen MQTT-Server (wie bei Summ!). */
+(function(){
+  const BROKERS = ['wss://broker.emqx.io:8084/mqtt', 'wss://broker.hivemq.com:8884/mqtt'];
+  const MAXP = 4;
+  window._vn = { get mode(){ return mode; }, get G(){ return G; }, toggleDoor: (sd) => toggleDoor(sd) };
+  const MP = window.MP = { on:false, host:false, id:Math.random().toString(36).slice(2, 10), name:'', code:'', client:null, players:new Map(), snap:null, sendT:0, allow:false, mute:false, lastSeen:0, evq:[] };
+  const topic = () => 'viktor-nacht-mp-7q2/' + MP.code;
+  const toast = (s, ms) => { const t = $('mpToast'); t.textContent = s; t.style.display = 'block'; clearTimeout(toast.h); toast.h = setTimeout(() => { t.style.display = 'none'; }, ms || 2500); };
+  function loadMqtt(cb){ if (window.mqtt) return cb(); const s = document.createElement('script'); s.src = 'https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js'; s.onload = cb; s.onerror = () => status('❌ Keine Verbindung zum Server.'); document.head.appendChild(s); }
+  function send(o){ if (MP.client && MP.client.connected) MP.client.publish(topic(), JSON.stringify(Object.assign({from:MP.id}, o))); }
+  function connect(i, done){
+    if (i >= BROKERS.length){ status('❌ Server nicht erreichbar – später nochmal versuchen.'); return; }
+    let c; try { c = window.mqtt.connect(BROKERS[i], {connectTimeout:7000, reconnectPeriod:3000, clean:true}); } catch(e){ return connect(i + 1, done); }
+    let ok = false; const tm = setTimeout(() => { if (!ok){ try { c.end(true); } catch(e){} connect(i + 1, done); } }, 8000);
+    c.on('connect', () => { if (ok) return; ok = true; clearTimeout(tm); MP.client = c; c.subscribe(topic(), () => done()); });
+    c.on('message', (tp, buf) => { let m; try { m = JSON.parse(typeof buf === 'string' ? buf : new TextDecoder().decode(buf)); } catch(e){ return; } if (m && m.from !== MP.id) handle(m); });
+  }
+  const list = () => [[MP.id, MP.name]].concat([...MP.players].map(([id, p]) => [id, p.name]));
+  // ---------- Lobby ----------
+  let box = null;
+  function status(s){ const e = document.getElementById('mpSt'); if (e) e.textContent = s; }
+  function openLobby(){
+    audioInit();
+    if (box) box.remove(); box = document.createElement('div'); box.id = 'mp';
+    const nm = MP.name || ('Wächter ' + (1 + Math.floor(Math.random() * 99)));
+    box.innerHTML = `<div class="box"><h2>👥 Mehrspieler</h2><div class="st">Bis zu 4 Wächter teilen sich Büro, Türen und Strom. Jeder hat seine eigene Kamera.</div>
+      <input id="mpName" maxlength="14" value="${nm}"><div class="row"><button class="btn primary" id="mpCreate">Raum erstellen</button></div>
+      <div class="st">– oder –</div><input id="mpCode" maxlength="5" placeholder="CODE"><div class="row"><button class="btn" id="mpJoin">Beitreten</button><button class="btn" id="mpBack">Zurück</button></div><div class="st" id="mpSt"></div></div>`;
+    document.body.appendChild(box);
+    $('mpBack').onclick = leave;
+    $('mpCreate').onclick = () => { MP.name = $('mpName').value.trim() || nm; MP.code = Math.random().toString(36).slice(2, 7).toUpperCase(); MP.host = true; go(); };
+    $('mpJoin').onclick = () => { const c = $('mpCode').value.trim().toUpperCase(); if (c.length < 4) return status('Code eingeben.'); MP.name = $('mpName').value.trim() || nm; MP.code = c; MP.host = false; go(); };
+  }
+  function go(){
+    status('⏳ Verbinde …');
+    loadMqtt(() => connect(0, () => { MP.on = true; MP.players.clear(); if (!MP.host) send({t:'hello', name:MP.name}); room(); hb(); }));
+  }
+  function room(){
+    if (!box) return;
+    const nights = Math.max(1, loadSave());
+    box.innerHTML = `<div class="box"><h2>👥 Raum</h2><div class="st">Code für deine Freunde:</div><div class="code">${MP.code}</div>
+      <div class="pl" id="mpList"></div>
+      ${MP.host ? `<select id="mpNight">${[1,2,3,4,5,6].map(n => `<option value="${n}" ${n === nights ? 'selected' : ''}>Nacht ${n}</option>`).join('')}</select><div class="row"><button class="btn primary" id="mpGo">Nacht starten</button></div>` : '<div class="st">Warte, bis der Host die Nacht startet …</div>'}
+      <div class="row"><button class="btn" id="mpBack">Verlassen</button></div><div class="st" id="mpSt"></div></div>`;
+    $('mpBack').onclick = leave;
+    if (MP.host) $('mpGo').onclick = () => { const n = +$('mpNight').value; MP.allow = true; startNight(n); MP.allow = false; };
+    drawList();
+  }
+  function drawList(){ const l = document.getElementById('mpList'); if (l) l.innerHTML = list().map(([id, n], i) => `<div>${i === 0 && MP.host ? '👑 ' : '🔦 '}${n}${id === MP.id ? ' (du)' : ''}</div>`).join(''); bar(); }
+  function leave(){
+    if (MP.client){ send({t:'bye'}); const c = MP.client; setTimeout(() => { try { c.end(true); } catch(e){} }, 200); }
+    MP.client = null; MP.on = false; MP.host = false; MP.players.clear(); MP.snap = null;
+    if (box){ box.remove(); box = null; } bar(); if (mode !== 'menu') showMenu();
+  }
+  // Herzschlag + Zustand senden
+  function hb(){
+    if (!MP.on) return;
+    const now = performance.now();
+    if (MP.host){
+      for (const [id, p] of MP.players) if (now - p.seen > 9000){ MP.players.delete(id); toast('🔦 ' + p.name + ' hat die Schicht verlassen'); drawList(); }
+      if (mode === 'game' && G) send({t:'st', s:snapshot(), ev:MP.evq.splice(0), pl:list()}); else { send({t:'lobby', pl:list()}); MP.evq.length = 0; }
+    } else { send({t:'ping', name:MP.name, cam:!!(G && G.cam), view:G ? G.camView : '1A'}); if (MP.lastSeen && now - MP.lastSeen > 10000){ toast('❌ Verbindung zum Host verloren', 4000); leave(); return; } }
+    setTimeout(hb, MP.host && mode === 'game' ? 110 : 900);
+  }
+  function snapshot(){
+    return {n:G.night, t:G.t, hr:G.hour, p:G.power, dL:G.doorL, dR:G.doorR, lL:G.lightL, lR:G.lightR, v:G.vik.map(v => [v.pos, v.seen ? 1 : 0]),
+      la:[G.lange.stage, G.lange.run], ins:G.inside ? G.inside.id : null, out:G.out, op:G.outPhase, sc:G.scare ? G.scare.why : null, won:G.won, st:G.staticT};
+  }
+  function handle(m){
+    if (MP.host){
+      if (m.t === 'hello' || m.t === 'ping'){
+        if (!MP.players.has(m.from)){ if (MP.players.size >= MAXP - 1){ send({t:'full', to:m.from}); return; } MP.players.set(m.from, {name:m.name || 'Wächter', cam:false, view:'1A', seen:performance.now()}); toast('🔦 ' + (m.name || 'Wächter') + ' ist dabei'); drawList(); }
+        const p = MP.players.get(m.from); p.seen = performance.now(); if (m.t === 'ping'){ p.cam = !!m.cam; p.view = m.view || '1A'; p.name = m.name || p.name; }
+        if (m.t === 'hello' && mode === 'game' && G) send({t:'start', n:G.night, to:m.from});
+      } else if (m.t === 'act' && mode === 'game' && G){
+        const p = MP.players.get(m.from); if (!p) return;
+        const was = G.cam; G.cam = false; // Aktion so ausführen, als wäre die Kamera unten
+        if (m.a === 'door') { if (canAct()) { if (m.side === 'L') G.doorL = !G.doorL; else G.doorR = !G.doorR; S.door(); syncHUD(true); } }
+        else if (m.a === 'light') { if (canAct()){ if (m.side === 'L'){ G.lightL = !G.lightL; G.lightR = false; } else { G.lightR = !G.lightR; G.lightL = false; } const on = m.side === 'L' ? G.lightL : G.lightR; const v = G.vik.find(x => x.pos === m.side); if (on && v && !v.seen){ v.seen = true; S.sting(); } syncHUD(true); } }
+        G.cam = was;
+      } else if (m.t === 'bye'){ const p = MP.players.get(m.from); if (p){ MP.players.delete(m.from); toast('🔦 ' + p.name + ' hat die Schicht verlassen'); drawList(); } }
+    } else {
+      if (m.to && m.to !== MP.id) return;
+      MP.lastSeen = performance.now();
+      if (m.t === 'full'){ toast('❌ Der Raum ist voll (max. 4)', 4000); leave(); return; }
+      if (m.pl){ MP.list = m.pl; const l = document.getElementById('mpList'); if (l) l.innerHTML = m.pl.map(([id, n], i) => `<div>${i === 0 ? '👑 ' : '🔦 '}${n}${id === MP.id ? ' (du)' : ''}</div>`).join(''); bar(); }
+      if (m.t === 'start'){ if (box){ box.remove(); box = null; } MP.allow = true; startNight(m.n); MP.allow = false; MP.snap = null; }
+      if (m.t === 'st'){ if (mode !== 'game' || !G || G.night !== m.s.n){ if (!m.s.won && !m.s.sc){ if (box){ box.remove(); box = null; } MP.allow = true; startNight(m.s.n); MP.allow = false; } } MP.snap = m.s; MP.mute = true; for (const [k, a] of (m.ev || [])) { try { if (S0[k]) S0[k].apply(S, a || []); } catch(e){} } MP.mute = false; }
+      if (m.t === 'bye' && MP.list && MP.list[0] && MP.list[0][0] === m.from){ toast('❌ Der Host hat das Spiel verlassen', 4000); leave(); }
+    }
+  }
+  // Sounds des Hosts an alle schicken
+  const S0 = {}; for (const k of Object.keys(S)){ S0[k] = S[k]; S[k] = function(){ if (MP.on && MP.host && mode === 'game') MP.evq.push([k, [...arguments]]); if (MP.on && !MP.host && MP.mute === false && mode === 'game' && ['door', 'sting', 'bang', 'steps', 'heavy', 'creak', 'clang', 'scream', 'roar', 'powerDown', 'run', 'breath', 'chime'].includes(k)) return; return S0[k].apply(S, arguments); }; }
+  // ---------- Hooks ins Spiel ----------
+  window.MPV = room => { if (!MP.on || !MP.host) return false; for (const p of MP.players.values()) if (p.cam && p.view === room) return true; return false; };
+  window.MPC = () => { if (!MP.on || !MP.host) return false; for (const p of MP.players.values()) if (p.cam) return true; return false; };
+  window.MPact = (a, side) => { if (!MP.on || MP.host) return false; send({t:'act', a, side}); return true; };
+  window.MPcam = () => { if (MP.on && !MP.host) send({t:'ping', name:MP.name, cam:!!(G && G.cam), view:G ? G.camView : '1A'}); };
+  window.MPforceCamDown = () => {};
+  window.MPstart = n => { if (!MP.on || MP.allow) return false; if (MP.host){ MP.allow = true; startNight(n); MP.allow = false; send({t:'start', n}); return true; } toast('⏳ Nur der Host kann die Nacht starten'); return true; };
+  const ids = ['grey', 'red', 'blue', 'daniel'];
+  window.MPclientUpdate = dt => {
+    if (!MP.on || MP.host) return false;
+    const s = MP.snap; if (!s || !G) return true;
+    if (G.scare){ G.scare.t += dt; if (G.scare.t > 1.5 && !G.scare.done){ G.scare.done = true; showDeath(G.scare.why); } return true; }
+    if (G.won) return true;
+    G.t = s.t; G.hour = s.hr; G.power = s.p; G.doorL = s.dL; G.doorR = s.dR; G.lightL = s.lL; G.lightR = s.lR;
+    s.v.forEach((a, i) => { const v = G.vik[i]; if (v){ v.pos = a[0]; v.seen = !!a[1]; } });
+    G.lange.stage = s.la[0]; G.lange.run = s.la[1];
+    G.inside = s.ins ? (G.vik.find(v => v.id === s.ins) || {id:s.ins}) : null;
+    if (s.out && !G.out){ G.out = true; if (G.cam) setCam(false, true); ambience(false); setBuzz(false); }
+    G.outPhase = s.op; musicBox(G.out && s.op === 1);
+    G.dl = approach(G.dl, G.doorL ? 1 : 0, dt * 7); G.dr = approach(G.dr, G.doorR ? 1 : 0, dt * 7);
+    G.staticT = Math.max(0, G.staticT - dt); if (rnd() < dt * 0.4) G.flick = 0.08 + rnd() * 0.25; G.flick = Math.max(0, G.flick - dt);
+    if (G.inside && G.cam && !s.sc){ G.insideCam = (G.insideCam || 0) + dt; if (G.insideCam > 9) setCam(false, true); }
+    setBuzz(!G.out && (G.lightL || G.lightR));
+    if (s.sc && !G.scare){ MP.mute = false; scare(s.sc); return true; }
+    if (s.won && !G.won){ win(); return true; }
+    syncHUD();
+    return true;
+  };
+  // Spielerleiste
+  function bar(){
+    let b = document.getElementById('mpBar');
+    if (!MP.on){ if (b) b.remove(); return; }
+    if (!b){ b = document.createElement('div'); b.id = 'mpBar'; document.body.appendChild(b); }
+    const l = MP.host ? list() : (MP.list || [[MP.id, MP.name]]);
+    b.innerHTML = '<span>Raum ' + MP.code + '</span>' + l.map(([id, n], i) => `<span>${i === 0 ? '👑' : '🔦'} ${n}${id === MP.id ? ' (du)' : ''}</span>`).join('');
+  }
+  // Knopf im Menü
+  const acts = document.querySelector('#menu .actions');
+  if (acts){ const b = document.createElement('button'); b.className = 'btn'; b.id = 'btnMp'; b.textContent = '👥 Mehrspieler (bis 4)'; b.onclick = openLobby; acts.appendChild(b); }
+  const k = document.querySelector('#menu .keys'); if (k) k.textContent += ' · Koop mit bis zu 4 Leuten';
+  // im Mehrspieler: „Menü“ verlässt auch den Raum
+  $('resMenu').addEventListener('click', () => { if (MP.on) leave(); });
+})();
+
 showMenu();
 requestAnimationFrame(frame);
 })();
 </script>
+<style>
+#mp{position:fixed;inset:0;z-index:8;display:grid;place-items:center;background:rgba(5,4,3,.92)}
+#mp .box{width:min(30rem,92vw);display:grid;gap:12px;text-align:center;padding:18px;border:1px solid #3d3933;background:rgba(12,11,10,.95)}
+#mp h2{font-family:var(--term);font-size:34px;letter-spacing:.12em;color:var(--ash);margin:0}
+#mp input,#mp select{font-family:var(--term);font-size:24px;letter-spacing:.1em;text-align:center;background:#0c0b0a;color:var(--ash);border:1px solid #3d3933;padding:8px;width:100%;text-transform:uppercase}
+#mp .row{display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
+#mp .code{font-family:var(--term);font-size:56px;letter-spacing:.3em;color:#ffd23f}
+#mp .pl{font-family:var(--term);font-size:22px;color:var(--ash);display:grid;gap:4px}
+#mp .st{font-family:var(--term);font-size:19px;opacity:.75;min-height:1.2em}
+#mpBar{position:fixed;top:8px;left:50%;transform:translateX(-50%);z-index:4;display:flex;gap:8px;font-family:var(--term);font-size:18px;pointer-events:none}
+#mpBar span{background:rgba(0,0,0,.6);border:1px solid #3d3933;padding:2px 8px;color:var(--ash)}
+#mpToast{position:fixed;bottom:110px;left:50%;transform:translateX(-50%);z-index:9;font-family:var(--term);font-size:22px;color:#ffd23f;background:rgba(0,0,0,.75);padding:6px 14px;border:1px solid #3d3933;display:none}
+</style>
+<div id="mpToast"></div>
+
+
 </body>
 </html>
