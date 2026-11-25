@@ -1325,7 +1325,7 @@ function frame(now){
       ${MP.host ? `<select id="mpNight">${[1,2,3,4,5,6].map(n => `<option value="${n}" ${n === nights ? 'selected' : ''}>Nacht ${n}</option>`).join('')}</select><div class="row"><button class="btn primary" id="mpGo">Nacht starten</button></div>` : '<div class="st">Warte, bis der Host die Nacht startet …</div>'}
       <div class="row"><button class="btn" id="mpBack">Verlassen</button></div><div class="st" id="mpSt"></div></div>`;
     $('mpBack').onclick = leave;
-    if (MP.host) $('mpGo').onclick = () => { const n = +$('mpNight').value; MP.allow = true; startNight(n); MP.allow = false; };
+    if (MP.host) $('mpGo').onclick = () => { const n = +$('mpNight').value; if (box){ box.remove(); box = null; } MP.allow = true; startNight(n); MP.allow = false; send({t:'start', n}); };
     drawList();
   }
   function drawList(){ const l = document.getElementById('mpList'); if (l) l.innerHTML = list().map(([id, n], i) => `<div>${i === 0 && MP.host ? '👑 ' : '🔦 '}${n}${id === MP.id ? ' (du)' : ''}</div>`).join(''); bar(); }
@@ -1379,7 +1379,7 @@ function frame(now){
   window.MPact = (a, side) => { if (!MP.on || MP.host) return false; send({t:'act', a, side}); return true; };
   window.MPcam = () => { if (MP.on && !MP.host) send({t:'ping', name:MP.name, cam:!!(G && G.cam), view:G ? G.camView : '1A'}); };
   window.MPforceCamDown = () => {};
-  window.MPstart = n => { if (!MP.on || MP.allow) return false; if (MP.host){ MP.allow = true; startNight(n); MP.allow = false; send({t:'start', n}); return true; } toast('⏳ Nur der Host kann die Nacht starten'); return true; };
+  window.MPstart = n => { if (!MP.on || MP.allow) return false; if (MP.host){ if (box){ box.remove(); box = null; } MP.allow = true; startNight(n); MP.allow = false; send({t:'start', n}); return true; } toast('⏳ Nur der Host kann die Nacht starten'); return true; };
   const ids = ['grey', 'red', 'blue', 'daniel'];
   window.MPclientUpdate = dt => {
     if (!MP.on || MP.host) return false;
@@ -1430,7 +1430,7 @@ requestAnimationFrame(frame);
 #mp .code{font-family:var(--term);font-size:56px;letter-spacing:.3em;color:#ffd23f}
 #mp .pl{font-family:var(--term);font-size:22px;color:var(--ash);display:grid;gap:4px}
 #mp .st{font-family:var(--term);font-size:19px;opacity:.75;min-height:1.2em}
-#mpBar{position:fixed;top:8px;left:50%;transform:translateX(-50%);z-index:4;display:flex;gap:8px;font-family:var(--term);font-size:18px;pointer-events:none}
+#mpBar{position:fixed;top:6px;right:8px;z-index:4;display:flex;flex-direction:column;align-items:flex-end;gap:3px;font-family:var(--term);font-size:14px;pointer-events:none;opacity:.8}
 #mpBar span{background:rgba(0,0,0,.6);border:1px solid #3d3933;padding:2px 8px;color:var(--ash)}
 #mpToast{position:fixed;bottom:110px;left:50%;transform:translateX(-50%);z-index:9;font-family:var(--term);font-size:22px;color:#ffd23f;background:rgba(0,0,0,.75);padding:6px 14px;border:1px solid #3d3933;display:none}
 </style>
